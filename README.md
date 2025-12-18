@@ -29,7 +29,7 @@ Basic knowledge of n8n nodes and workflows.
 
 Installation
 
-Clone this repository:textgit clone https://github.com/yourusername/n8n-workflows-collection.git
+Clone this repository:textgit clone https://github.com/MOHAEDKHALED/n8n-Workflows-Collection.git
 Open n8n in your browser (e.g., http://localhost:5678 if self-hosted).
 Import each workflow:
 Go to n8n dashboard > Workflows > Import from File.
