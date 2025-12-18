@@ -1,0 +1,270 @@
+{
+  "name": "CRM Exception RAG Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "exception-recommendation",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "8ae2e9be-cc3a-4b85-ad7a-0e32dcf95861",
+      "name": "Webhook - Receive Exception",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -448,
+        160
+      ],
+      "webhookId": "exception-recommendation"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "EXEC sp_SearchSimilarExceptions @Module = '{{ $json.body.module }}', @Keywords = '{{ $json.body.description }}', @TopResults = 5"
+      },
+      "id": "ba90d698-ff29-4a5b-a539-ce32de134b74",
+      "name": "Search Database for Similar Exceptions",
+      "type": "n8n-nodes-base.microsoftSql",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        160
+      ],
+      "credentials": {
+        "microsoftSql": {
+          "id": "sY24J7QIOfg8NyGp",
+          "name": "Microsoft SQL account"
+        }
+      },
+      "notes": "استخدم الـ Stored Procedure للبحث عن exceptions مشابهة"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.length }}",
+              "operation": "larger"
+            }
+          ]
+        }
+      },
+      "id": "1254814a-e090-4c49-8911-8632977baef3",
+      "name": "Found Similar Exceptions?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process database results and create RAG context\nconst similarExceptions = $input.all();\nconst currentException = $node['Webhook - Receive Exception'].json.body;\n\nconst context = similarExceptions.map((item, index) => {\n  return `\nSimilar Exception ${index + 1}:\nModule: ${item.json.Module}\nTitle: ${item.json.Title}\nDescription: ${item.json.Description}\nRecommendation: ${item.json.RecommendationText}\nConfidence: ${item.json.ConfidenceScore}\nWas Helpful: ${item.json.WasHelpful ? 'Yes' : 'No'}\n---`;\n}).join('\\n');\n\nreturn {\n  json: {\n    hasHistoricalData: true,\n    context: context,\n    currentException: currentException,\n    similarCount: similarExceptions.length,\n    bestMatch: similarExceptions[0]?.json || null\n  }\n};"
+      },
+      "id": "c98601af-cbd6-4c7c-b66c-d540fafa97da",
+      "name": "Prepare RAG Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// No historical data found\nconst currentException = $node['Webhook - Receive Exception'].json.body;\n\nreturn {\n  json: {\n    hasHistoricalData: false,\n    context: 'No similar exceptions found in database.',\n    currentException: currentException\n  }\n};"
+      },
+      "id": "291d39df-4a4f-45c5-b7e4-6e545f94ec7d",
+      "name": "No Historical Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert CRM technical support assistant. Provide concise, actionable recommendations in 2-3 sentences maximum. Focus on root cause and specific solution steps. Use the historical data provided as context. Be direct and avoid unnecessary explanations.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Exception:\\n- Project: {{ $json.currentException.projectId }}\\n- Module: {{ $json.currentException.module }}\\n- Issue: {{ $json.currentException.description }}\\n\\nHistorical Context:\\n{{ $json.context }}\\n\\nProvide a short, actionable solution (max 200 words). Return JSON: {\\\"recommendation\\\": \\\"solution in 2-3 sentences\\\", \\\"confidence\\\": 0-1, \\\"reasoning\\\": \\\"brief explanation\\\"}\"\n    }\n  ],\n  \"temperature\": 0.3,\n  \"max_tokens\": 500\n}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "b25d1825-9628-4eac-9a85-f19b5e0e5ebf",
+      "name": "Call OpenAI API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        224,
+        160
+      ],
+      "notes": "ضع OpenAI API Key هنا: Authorization: Bearer YOUR_OPENAI_API_KEY"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse OpenAI response and prepare final output\nconst items = $input.all();\nconst openaiResponse = items[0].json;\n\n// ✅ Get webhook data safely\nconst webhookData = $('Webhook - Receive Exception').first().json.body;\n\n// ✅ Initialize default context\nlet ragContext = {\n  hasHistoricalData: false,\n  similarCount: 0\n};\n\n// ✅ Try to get context - handle both paths\ntry {\n  // Check which path was executed\n  const prepareRAG = $('Prepare RAG Context').all();\n  const noHistorical = $('No Historical Data').all();\n  \n  if (prepareRAG.length > 0) {\n    ragContext = prepareRAG[0].json;\n  } else if (noHistorical.length > 0) {\n    ragContext = noHistorical[0].json;\n  }\n} catch (error) {\n  // Use default context if error\n  console.log('Using default context');\n}\n\n// ✅ Function to clean text\nfunction cleanText(text) {\n  if (!text) return '';\n  return text\n    .replace(/[\\r\\n]+/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .replace(/[^\\x20-\\x7E\\u0600-\\u06FF]/g, '')\n    .replace(/'/g, \"''\")\n    .trim();\n}\n\nlet recommendation = '';\nlet confidence = 0.65;\nlet reasoning = 'Generated from AI analysis';\n\n// ✅ Parse OpenAI response\ntry {\n  if (openaiResponse && openaiResponse.choices && openaiResponse.choices[0]) {\n    const content = openaiResponse.choices[0].message.content;\n    \n    // Try parsing as JSON\n    try {\n      const parsed = JSON.parse(content);\n      recommendation = cleanText(parsed.recommendation || content);\n      confidence = parsed.confidence || (ragContext.hasHistoricalData ? 0.85 : 0.65);\n      reasoning = cleanText(parsed.reasoning || reasoning);\n    } catch (e) {\n      // Not JSON, use raw text\n      recommendation = cleanText(content);\n      confidence = ragContext.hasHistoricalData ? 0.85 : 0.65;\n      reasoning = ragContext.hasHistoricalData \n        ? 'Based on similar historical exceptions' \n        : 'Generated from AI analysis';\n    }\n  } else {\n    recommendation = 'No recommendation available';\n  }\n} catch (error) {\n  recommendation = 'Error generating recommendation';\n  console.error('Error parsing OpenAI response:', error);\n}\n\n// ✅ Return clean response\nreturn {\n  json: {\n    exceptionId: webhookData.exceptionId,\n    projectId: webhookData.projectId,\n    module: webhookData.module,\n    recommendation: recommendation,\n    confidence: confidence,\n    model: 'gpt-4o-mini',\n    source: ragContext.hasHistoricalData ? 'Hybrid' : 'AI_Model',\n    isFromDatabase: ragContext.hasHistoricalData,\n    reasoning: reasoning,\n    similarExceptionsFound: ragContext.similarCount || 0,\n    generatedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "2938f1c2-6146-45c8-ba46-63a5ec893f02",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO AIRecommendations (\n    ExceptionId, \n    RecommendationText, \n    ConfidenceScore, \n    Model, \n    Source, \n    IsFromDatabase, \n    GeneratedAt\n)\nVALUES (\n    {{ $json.exceptionId }}, \n    '{{ $json.recommendation }}',\n    {{ $json.confidence }}, \n    '{{ $json.model }}', \n    '{{ $json.source }}', \n    {{ $json.isFromDatabase ? 1 : 0 }}, \n    GETUTCDATE()\n);\n\n-- SELECT SCOPE_IDENTITY() AS RecommendationId;"
+      },
+      "id": "291b1e7e-5239-4906-ab6f-8bc467837f81",
+      "name": "Save Recommendation to Database",
+      "type": "n8n-nodes-base.microsoftSql",
+      "typeVersion": 1,
+      "position": [
+        784,
+        256
+      ],
+      "credentials": {
+        "microsoftSql": {
+          "id": "sY24J7QIOfg8NyGp",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "a4c27a9a-61fd-4839-ada3-628a32c30d92",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        784,
+        96
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Receive Exception": {
+      "main": [
+        [
+          {
+            "node": "Search Database for Similar Exceptions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Database for Similar Exceptions": {
+      "main": [
+        [
+          {
+            "node": "Found Similar Exceptions?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Found Similar Exceptions?": {
+      "main": [
+        [
+          {
+            "node": "Prepare RAG Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Historical Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare RAG Context": {
+      "main": [
+        [
+          {
+            "node": "Call OpenAI API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Historical Data": {
+      "main": [
+        [
+          {
+            "node": "Call OpenAI API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call OpenAI API": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save Recommendation to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "747c6b1b-5e24-4717-890c-0181b8bffb72",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "bc1b964f439233721d446db7e759d28045709f222845947c2faac36cfc0ba47b"
+  },
+  "id": "vWqsRFLmrwxQ8HzM",
+  "tags": []
+}
